@@ -1,5 +1,5 @@
-from .madgcn_arch import MADGCN
-from .madgcn_runner import MADGCNRunner
-from .madgcn_layers import *
+from arch import MADGCN
+from runner import MADGCNRunner
+from layers import *
 
 __all__ = ["MADGCN", "MADGCNRunner"] 

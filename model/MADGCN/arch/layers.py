@@ -150,26 +150,18 @@ class PatchMixerLayer(nn.Module):
         )
     
     def forward(self, x):
-        # x: [batch, seq_len, dim]
         residual = x
         x = self.norm1(x)
-        
-        # 卷积操作
-        x_conv = x.transpose(1, 2)  # [batch, dim, seq_len]
+        x_conv = x.transpose(1, 2)
         x_conv = self.conv(x_conv)
         x_conv = self.activation(x_conv)
-        x_conv = x_conv.transpose(1, 2)  # [batch, seq_len, dim]
+        x_conv = x_conv.transpose(1, 2)
         x_conv = self.dropout(x_conv)
-        
-        # 残差连接
         x = residual + x_conv
-        
-        # FFN
         residual = x
         x = self.norm2(x)
         x = self.ffn(x)
         x = residual + x
-        
         return x
 
 class PatchMixerBackbone(nn.Module):
@@ -181,56 +173,33 @@ class PatchMixerBackbone(nn.Module):
         self.stride = stride
         self.d_model = d_model
         self.n_layers = n_layers
-        
-        # 计算patch数量
         self.patch_num = int((seq_len - patch_len) / stride + 1)
         if seq_len % stride != 0:
             self.patch_num += 1
-            
-        # Patch嵌入
         self.patch_embedding = nn.Linear(patch_len * in_channel, d_model)
-        
-        # Patch mixer层
         self.mixer_layers = nn.ModuleList([
             PatchMixerLayer(d_model, kernel_size, dropout)
             for _ in range(n_layers)
         ])
-        
-        # 输出投影
         self.norm = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, d_model)
         
     def forward(self, x):
-        # x: [batch, seq_len, features]
         batch_size, seq_len, n_features = x.shape
-        
-        # 创建patches
         patches = []
         for i in range(0, seq_len - self.patch_len + 1, self.stride):
             patch = x[:, i:i+self.patch_len, :]
             patches.append(patch.reshape(batch_size, -1))
-        
-        # 如果最后一个patch不完整，用零填充
         if len(patches) * self.stride < seq_len:
             last_patch = x[:, -self.patch_len:, :]
             patches.append(last_patch.reshape(batch_size, -1))
-            
-        patches = torch.stack(patches, dim=1)  # [batch, patch_num, patch_len * features]
-        
-        # Patch嵌入
-        x = self.patch_embedding(patches)  # [batch, patch_num, d_model]
-        
-        # Mixer层
+        patches = torch.stack(patches, dim=1)
+        x = self.patch_embedding(patches)
         for mixer_layer in self.mixer_layers:
             x = mixer_layer(x)
-            
-        # 全局平均池化
-        x = x.mean(dim=1)  # [batch, d_model]
-        
-        # 输出投影
+        x = x.mean(dim=1)
         x = self.norm(x)
         x = self.head(x)
-        
         return x
 
 class STLDecomposition(nn.Module):
@@ -240,120 +209,46 @@ class STLDecomposition(nn.Module):
         self.num_iterations = num_iterations
         
     def simple_moving_average(self, x, window_size):
-        """简化的移动平均实现"""
         if x.dim() == 1:
             x = x.unsqueeze(0)
         batch_size, seq_len = x.shape
-        
-        # 使用卷积实现移动平均
         kernel = torch.ones(1, 1, window_size, device=x.device) / window_size
         x_padded = F.pad(x.unsqueeze(1), (window_size//2, window_size//2), mode='replicate')
         smoothed = F.conv1d(x_padded, kernel, padding=0)
-        
         return smoothed.squeeze(1)
     
     def extract_trend(self, x):
-        """提取趋势分量"""
         window_size = max(3, self.period // 2)
         if window_size % 2 == 0:
             window_size += 1
         return self.simple_moving_average(x, window_size)
     
     def extract_seasonal(self, detrended):
-        """提取季节性分量"""
         batch_size, seq_len = detrended.shape
         seasonal = torch.zeros_like(detrended)
-        
         for i in range(self.period):
-            # 提取每个季节性位置的子序列
             indices = torch.arange(i, seq_len, self.period, device=detrended.device)
             if len(indices) > 1:
                 subseries = detrended[:, indices]
-                # 使用中位数作为季节性分量
                 seasonal_value = torch.median(subseries, dim=1)[0]
                 seasonal[:, indices] = seasonal_value.unsqueeze(1)
-                
         return seasonal
     
     def forward(self, x):
-        """
-        STL分解
-        Args:
-            x: [batch_size, seq_len, features]
-        Returns:
-            trends, seasonals, residuals: 每个都是 [batch_size, seq_len, features]
-        """
         batch_size, seq_len, n_features = x.shape
-        
         trends = torch.zeros_like(x)
         seasonals = torch.zeros_like(x)
         residuals = torch.zeros_like(x)
-        
         for f in range(n_features):
-            series = x[:, :, f]  # [batch_size, seq_len]
-            
-            # 初始趋势估计
+            series = x[:, :, f]
             trend = self.extract_trend(series)
-            
             for iteration in range(self.num_iterations):
-                # 去趋势
                 detrended = series - trend
-                
-                # 提取季节性
                 seasonal = self.extract_seasonal(detrended)
-                
-                # 去季节性后重新估计趋势
                 deseasonalized = series - seasonal
                 trend = self.extract_trend(deseasonalized)
-            
-            # 计算残差
             residual = series - trend - seasonal
-            
             trends[:, :, f] = trend
             seasonals[:, :, f] = seasonal
             residuals[:, :, f] = residual
-            
         return trends, seasonals, residuals
-
-class GrangerCausalityTest:
-    @staticmethod
-    def granger_test(residuals, meteorology, max_lag=3):
-        """
-        简化的Granger因果关系测试
-        Args:
-            residuals: [batch_size, seq_len, num_nodes, 1]
-            meteorology: [batch_size, seq_len, num_nodes, num_met_features]
-            max_lag: 最大滞后阶数
-        Returns:
-            causal_matrix: [batch_size, num_nodes, num_nodes]
-        """
-        batch_size, seq_len, num_nodes, _ = residuals.shape
-        device = residuals.device
-        
-        # 简化实现：基于相关性计算因果强度
-        causal_matrix = torch.zeros(batch_size, num_nodes, num_nodes, device=device)
-        
-        # 计算空间相关性作为因果强度的代理
-        for b in range(batch_size):
-            res_b = residuals[b, :, :, 0]  # [seq_len, num_nodes]
-            
-            # 计算滞后相关性
-            corr_sum = torch.zeros(num_nodes, num_nodes, device=device)
-            
-            for lag in range(1, min(max_lag + 1, seq_len // 2)):
-                if seq_len - lag > lag:
-                    # 计算滞后相关性
-                    res_lag = res_b[:-lag]  # [seq_len-lag, num_nodes]
-                    res_curr = res_b[lag:]   # [seq_len-lag, num_nodes]
-                    
-                    # 标准化
-                    res_lag_norm = F.normalize(res_lag, p=2, dim=0)
-                    res_curr_norm = F.normalize(res_curr, p=2, dim=0)
-                    
-                    # 计算相关性矩阵
-                    corr = torch.mm(res_lag_norm.T, res_curr_norm) / (seq_len - lag)
-                    corr_sum += torch.abs(corr) / lag  # 距离越近权重越大
-            
-            causal_matrix[b] = corr_sum / max_lag
-            
-        return causal_matrix 

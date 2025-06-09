@@ -31,7 +31,7 @@ We introduce LargeAQ, a publicly available, nationwide air quality dataset spann
     pip install -r requirements.txt
     ```
 
-2.  Download data. You can download our LargeAQ dataset from our GitHub repository. Create a separate folder `./dataset` and put all the files in the directory.
+2.  Download data. You can download our LargeAQ dataset from our GitHub repository. Create a separate folder `./dataset` and put all the files in the directory. The LargeAQ dataset and the code for constructing the dual graph will be open sourced after the paper is accepted.
 
 3.  Training. All the scripts are in the directory `./scripts/MADGCN`. For example, if you want to get the forecasting results for the LargeAQ dataset, just run the following command. You can check `result.txt` to see the results once training is done, and the log file is in `./logs/largeaq/*.log`.
 

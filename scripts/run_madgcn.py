@@ -5,7 +5,7 @@ import argparse
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 
-from basicts import launch_training
+from tools import launch_training
 
 def run_madgcn(config_file=None, gpus=None, seed=None):
     if config_file is None:

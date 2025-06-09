@@ -36,6 +36,7 @@ We introduce LargeAQ, a publicly available, nationwide air quality dataset spann
 
     ```
     sh ./scripts/MADGCN/largeaq.sh
+
     ```
 
 ## Results
@@ -54,4 +55,5 @@ We also appreciate the following GitHub repos for their valuable code bases and 
 
 - https://github.com/yuqinie98/PatchTST
 - https://github.com/GestaltCogTeam/BasicTS
+
 

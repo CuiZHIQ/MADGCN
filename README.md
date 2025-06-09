@@ -8,8 +8,6 @@ In response to escalating global air pollution, air quality forecasting has garn
 
 ## Model Overview
 
-![alt text](pic/MADGCN.png)
-
 MADGCN is primarily composed of a dynamic causality discovery module, a causal-aware graph convolution module, and a Patch-Mixer module. Its distinguishing feature is the dynamic causality discovery grounded in the Granger Causality principle, enabling it to capture evolving causal relationships between meteorological conditions and AQI dynamics. These inferred causal structures guide the graph convolution and PatchMixer modules to model spatial interactions and multiscale temporal dependencies together.
 
 ## LargeAQ Dataset

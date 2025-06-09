@@ -55,5 +55,6 @@ We also appreciate the following GitHub repos for their valuable code bases and 
 
 - https://github.com/yuqinie98/PatchTST
 - https://github.com/GestaltCogTeam/BasicTS
+- https://github.com/PoorOtterBob/CauAir
 
 

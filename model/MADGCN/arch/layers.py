@@ -52,116 +52,73 @@ class gcn(nn.Module):
 class SpatialGCN(nn.Module):
     def __init__(self, in_dim, out_dim, dropout=0.3, order=2):
         super().__init__()
-        self.gcn = gcn(in_dim, out_dim, dropout, support_len=1, order=order)
-        self.out_dim = out_dim
-        
+        self.gcn_layer = gcn(in_dim, out_dim, dropout, support_len=1, order=order)
+
     def forward(self, x, adj):
-        batch_time, num_nodes, channels = x.shape
         x = x.permute(0, 2, 1).unsqueeze(-1)
         
-        if adj.dim() == 2:
-            support = [adj]
-        elif adj.dim() == 3:
-            if adj.shape[0] == batch_time:
-                support = [adj.mean(dim=0)]
-            else:
-                support = [adj.mean(dim=0)]
-        else:
-            raise ValueError(f"Unsupported adjacency matrix shape: {adj.shape}")
-            
-        output = self.gcn(x, support)
+        support = [adj]
+        
+        output = self.gcn_layer(x, support)
+        
         output = output.squeeze(-1).permute(0, 2, 1)
-        return output 
+        return output
 
 class RecurrentCycle(nn.Module):
     def __init__(self, cycle_len, channel_size):
         super(RecurrentCycle, self).__init__()
         self.cycle_len = cycle_len
-        self.channel_size = channel_size
-        self.data = nn.Parameter(torch.randn(cycle_len, channel_size) * 0.1, requires_grad=True)
+        self.data = nn.Parameter(torch.randn(cycle_len, channel_size) * 0.1)
 
-    def forward(self, index, length):
-        batch_size = index.shape[0]
+    def forward(self, cycle_index, output_len):
+        batch_size = cycle_index.shape[0]
         outputs = []
         
         for i in range(batch_size):
-            cycle_idx = index[i].item() % self.cycle_len
-            rolled_data = torch.roll(self.data, shifts=-cycle_idx, dims=0)
-            if length <= self.cycle_len:
-                output = rolled_data[:length]
-            else:
-                num_repeats = length // self.cycle_len
-                remainder = length % self.cycle_len
-                repeated = rolled_data.repeat(num_repeats, 1)
-                if remainder > 0:
-                    output = torch.cat([repeated, rolled_data[:remainder]], dim=0)
-                else:
-                    output = repeated
-            outputs.append(output)
+            start_idx = cycle_index[i].item() % self.cycle_len
+            
+            rolled_data = torch.roll(self.data, shifts=-start_idx, dims=0)
+            
+            num_repeats = (output_len + self.cycle_len - 1) // self.cycle_len
+            tiled_data = rolled_data.repeat(num_repeats, 1)
+            
+            outputs.append(tiled_data[:output_len])
         
         return torch.stack(outputs)
 
-class EnhancedSeasonalModule(nn.Module):
-    def __init__(self, in_dim, cycle_len=24, gamma=0.1):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.tensor(gamma), requires_grad=True)
-        self.cycle_len = cycle_len
-        self.recurrent_cycle = RecurrentCycle(cycle_len, in_dim)
-        self.W_c = nn.Linear(in_dim, in_dim)
-        self.b_c = nn.Parameter(torch.zeros(in_dim))
-        self.enhancement_conv = nn.Conv1d(in_dim, in_dim, kernel_size=3, padding=1, groups=in_dim)
-        self.activation = nn.GELU()
-        self.norm = nn.LayerNorm(in_dim)
-        
-    def forward(self, seasonal_component, cycle_index=None):
-        batch_size, seq_len, num_nodes, channels = seasonal_component.shape
-        if cycle_index is None:
-            cycle_index = torch.arange(batch_size, device=seasonal_component.device) % self.cycle_len
-        enhanced_components = []
-        for n in range(num_nodes):
-            node_seasonal = seasonal_component[:, :, n, :]
-            cycle_enhanced = self.recurrent_cycle(cycle_index, seq_len)
-            combined = node_seasonal * cycle_enhanced
-            combined_reshaped = combined.view(-1, channels)
-            transformed = self.W_c(combined_reshaped) + self.b_c
-            transformed = transformed.view(batch_size, seq_len, channels)
-            conv_input = transformed.permute(0, 2, 1)
-            conv_output = self.activation(self.enhancement_conv(conv_input))
-            conv_output = conv_output.permute(0, 2, 1)
-            enhanced = node_seasonal + self.gamma * self.norm(conv_output)
-            enhanced_components.append(enhanced)
-        enhanced_seasonal = torch.stack(enhanced_components, dim=2)
-        return enhanced_seasonal
-
 class PatchMixerLayer(nn.Module):
-    def __init__(self, dim, kernel_size=8, dropout=0.1):
+    def __init__(self, d_model, kernel_size=8, dropout=0.1):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.conv = nn.Conv1d(dim, dim, kernel_size=kernel_size, groups=dim, padding='same')
+        self.norm1 = nn.LayerNorm(d_model)
+        self.conv = nn.Conv1d(d_model, d_model, kernel_size=kernel_size, groups=d_model, padding='same')
         self.activation = nn.GELU()
-        self.dropout = nn.Dropout(dropout)
-        self.norm2 = nn.LayerNorm(dim)
+        self.dropout_conv = nn.Dropout(dropout)
+        
+        self.norm2 = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
-            nn.Linear(dim, dim * 4),
+            nn.Linear(d_model, d_model * 4),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim),
+            nn.Linear(d_model * 4, d_model),
             nn.Dropout(dropout)
         )
     
     def forward(self, x):
         residual = x
         x = self.norm1(x)
+        
         x_conv = x.transpose(1, 2)
         x_conv = self.conv(x_conv)
         x_conv = self.activation(x_conv)
         x_conv = x_conv.transpose(1, 2)
-        x_conv = self.dropout(x_conv)
-        x = residual + x_conv
+        
+        x = residual + self.dropout_conv(x_conv)
+        
         residual = x
         x = self.norm2(x)
         x = self.ffn(x)
         x = residual + x
+        
         return x
 
 class PatchMixerBackbone(nn.Module):

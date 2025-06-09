@@ -4,6 +4,7 @@ from typing import Callable, Dict, Union, Tuple
 import easytorch
 
 
+
 def launch_runner(cfg: Union[Dict, str], fn: Callable, args: Tuple = (), device_type: str = "gpu", devices: str = None):
     easytorch_version = easytorch.__version__
     if version.parse(easytorch_version) >= version.parse("1.3"):

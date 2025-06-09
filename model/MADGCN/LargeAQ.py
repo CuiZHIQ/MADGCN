@@ -12,6 +12,7 @@ from model.MADGCN.arch.runner import MADGCNRunner
 
 CFG = EasyDict()
 
+
 CFG.DESCRIPTION = "MADGCN model configuration for LargeAQ dataset"
 CFG.RUNNER = MADGCNRunner
 CFG.DATASET_CLS = TimeSeriesForecastingDataset

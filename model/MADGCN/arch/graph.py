@@ -24,48 +24,69 @@ class GrangerCausality:
     def __init__(self, lag_r=12, lag_z=24):
         self.lag_r = lag_r
         self.lag_z = lag_z
-    
-    def compute(self, residuals, meteorology):
+
+    def _effective_lags(self, length):
+        if length < 4:
+            return 0, 0
+        max_lag = max(1, (length - 2) // 3)
+        return min(self.lag_r, max_lag), min(self.lag_z, max_lag)
+
+    def _compute_single(self, residuals, meteorology):
         B, T, N, C = residuals.shape
         if meteorology is None:
             return torch.zeros(N, N, device=residuals.device)
-        
-        max_lag = max(self.lag_r, self.lag_z)
+
+        lag_r, lag_z = self._effective_lags(T)
+        if lag_r == 0 or lag_z == 0:
+            return torch.zeros(N, N, device=residuals.device)
+
+        max_lag = max(lag_r, lag_z)
+        causal_matrix = torch.zeros(N, N, device=residuals.device)
+        R = residuals.mean(dim=0).mean(dim=-1)
+        Z = meteorology.mean(dim=0)
+
         if T <= max_lag + 1:
             return torch.zeros(N, N, device=residuals.device)
-        
-        causal_matrix = torch.zeros(N, N, device=residuals.device)
-        R = residuals.mean(dim=0).squeeze(-1)
-        Z = meteorology.mean(dim=0).mean(dim=-1)
-        
-        valid_len = T - max_lag
-        if valid_len < self.lag_r + self.lag_z + 1:
-            return torch.zeros(N, N, device=residuals.device)
-        
+
         for i in range(N):
             for j in range(N):
-                if i != j:
-                    try:
-                        y = R[max_lag:, j]
-                        features = []
-                        for lag in range(1, self.lag_r + 1):
-                            features.append(R[max_lag - lag:T - lag, j])
-                        for lag in range(1, self.lag_z + 1):
-                            features.append(Z[max_lag - lag:T - lag, i])
-                        
-                        min_len = min(len(y), min(len(f) for f in features))
-                        if min_len > 0:
-                            X = torch.stack([f[:min_len] for f in features], dim=1)
-                            y = y[:min_len]
-                            beta = torch.linalg.lstsq(X, y.unsqueeze(-1)).solution
-                            causal_matrix[i, j] = beta[self.lag_r:].abs().mean()
-                    except:
-                        pass
-        
+                y = R[max_lag:, j]
+                features = [torch.ones_like(y)]
+                for lag in range(1, lag_r + 1):
+                    features.append(R[max_lag - lag:T - lag, j])
+                for lag in range(1, lag_z + 1):
+                    features.append(Z[max_lag - lag:T - lag, i, :])
+
+                X = torch.cat([
+                    f.unsqueeze(-1) if f.dim() == 1 else f
+                    for f in features
+                ], dim=-1)
+                if X.shape[0] == 0:
+                    continue
+                beta = torch.linalg.lstsq(X, y.unsqueeze(-1)).solution.squeeze(-1)
+                causal_matrix[i, j] = beta[1 + lag_r:].abs().mean()
+
         max_val = causal_matrix.max()
         if max_val > 0:
             causal_matrix = causal_matrix / (max_val + 1e-8)
         return causal_matrix
+
+    def compute(self, residuals, meteorology):
+        return self._compute_single(residuals, meteorology)
+
+    def compute_sequence(self, residuals, meteorology, min_history=4):
+        B, T, N, _ = residuals.shape
+        matrices = []
+        last_valid = torch.zeros(N, N, device=residuals.device)
+        for end in range(1, T + 1):
+            if end < min_history:
+                matrices.append(last_valid)
+                continue
+            cur = self._compute_single(residuals[:, :end], meteorology[:, :end])
+            if torch.any(cur > 0):
+                last_valid = cur
+            matrices.append(last_valid)
+        return torch.stack(matrices, dim=0)
 
 
 class DynamicCAG(nn.Module):
@@ -98,21 +119,22 @@ class DynamicCAG(nn.Module):
     def forward(self, trends, seasons, residuals, meteorology=None):
         B, T, N, C = trends.shape
         
-        trend_flat = trends.mean(dim=0).squeeze(-1).t()
-        season_flat = seasons.mean(dim=0).squeeze(-1).t()
+        trend_flat = trends.mean(dim=0).mean(dim=-1).t()
+        season_flat = seasons.mean(dim=0).mean(dim=-1).t()
         
         sim_trend = cosine_similarity_matrix(trend_flat)
         sim_season = cosine_similarity_matrix(season_flat)
         
         if meteorology is not None:
-            causal_strength = self.granger.compute(residuals, meteorology)
+            causal_strength = self.granger.compute_sequence(residuals, meteorology)
         else:
-            causal_strength = torch.eye(N, device=trends.device) * 0.5
+            causal_strength = torch.eye(N, device=trends.device).unsqueeze(0).expand(T, -1, -1) * 0.5
         
         w_t, w_s, w_c = self.weights
-        cag = w_t * sim_trend + w_s * sim_season + w_c * causal_strength
-        
-        cag = (cag + cag.t()) / 2
+        static_similarity = w_t * sim_trend + w_s * sim_season
+        cag = static_similarity.unsqueeze(0) + w_c * causal_strength
         cag = cag.clamp(0, 1)
+        eye = torch.eye(N, device=trends.device).unsqueeze(0)
+        cag = cag * (1 - eye) + eye
         
         return cag

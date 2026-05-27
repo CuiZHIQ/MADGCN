@@ -44,30 +44,50 @@ class RevIN(nn.Module):
 
 
 class STLDecomposition(nn.Module):
-    def __init__(self, period=24, num_iterations=2):
+    def __init__(self, period=24, num_iterations=2, adaptive_period=True):
         super().__init__()
         self.period = period
         self.num_iterations = num_iterations
-        kernel_size = period if period % 2 == 1 else period + 1
-        self.trend_filter = nn.Conv1d(1, 1, kernel_size, padding=kernel_size//2, bias=False)
-        nn.init.constant_(self.trend_filter.weight, 1.0 / kernel_size)
-        
+        self.adaptive_period = adaptive_period
+
+    def _select_period(self, x_flat, length):
+        max_period = min(self.period, max(2, length // 2))
+        if not self.adaptive_period or max_period < 3:
+            return min(self.period, length)
+
+        centered = x_flat - x_flat.mean(dim=-1, keepdim=True)
+        var = centered.pow(2).mean().clamp(min=1e-8)
+        scores = []
+        candidates = range(2, max_period + 1)
+        for lag in candidates:
+            corr = (centered[:, :, lag:] * centered[:, :, :-lag]).mean() / var
+            scores.append(corr)
+        best = torch.stack(scores).argmax().item()
+        return list(candidates)[best]
+
+    def _moving_average(self, x, period):
+        kernel_size = max(3, period if period % 2 == 1 else period + 1)
+        padding = kernel_size // 2
+        x = F.pad(x, (padding, padding), mode='replicate')
+        return F.avg_pool1d(x, kernel_size=kernel_size, stride=1)
+
     def forward(self, x):
         B, T, C = x.shape
         x_flat = x.permute(0, 2, 1).reshape(B * C, 1, T)
         trend = torch.zeros_like(x_flat)
         seasonal = torch.zeros_like(x_flat)
+        period = self._select_period(x_flat, T)
         
         for _ in range(self.num_iterations):
             detrended = x_flat - trend
             new_seasonal = torch.zeros_like(x_flat)
-            for i in range(self.period):
-                indices = torch.arange(i, T, self.period, device=x.device)
+            for i in range(period):
+                indices = torch.arange(i, T, period, device=x.device)
                 if len(indices) > 0:
                     new_seasonal[:, :, indices] = detrended[:, :, indices].mean(dim=-1, keepdim=True)
             seasonal = new_seasonal
             deseasonalized = x_flat - seasonal
-            trend = self.trend_filter(deseasonalized)
+            trend = self._moving_average(deseasonalized, period)
             if trend.shape[-1] != T:
                 trend = F.interpolate(trend, size=T, mode='linear', align_corners=False)
         
@@ -114,16 +134,24 @@ class SpatialGCN(nn.Module):
         
     def normalize_adj(self, adj):
         deg = adj.sum(dim=-1, keepdim=True).clamp(min=1e-8)
-        deg_inv_sqrt = deg.pow(-0.5)
-        adj_norm = deg_inv_sqrt * adj * deg_inv_sqrt.transpose(-2, -1)
-        return adj_norm
+        return adj / deg
         
     def forward(self, x, adj):
         adj = self.normalize_adj(adj)
         out = [x]
         h = x
         for _ in range(self.order):
-            h = torch.matmul(adj, h)
+            if adj.dim() == 2:
+                h = torch.matmul(adj, h)
+            else:
+                if adj.dim() == 3:
+                    repeat = h.shape[0] // adj.shape[0]
+                    adj_batch = adj.repeat(repeat, 1, 1)
+                elif adj.dim() == 4:
+                    adj_batch = adj.reshape(-1, adj.shape[-2], adj.shape[-1])
+                else:
+                    raise ValueError(f"Unsupported adjacency shape: {tuple(adj.shape)}")
+                h = torch.bmm(adj_batch, h)
             out.append(h)
         out = torch.cat(out, dim=-1)
         out = self.dropout(F.relu(self.linear(out)))
@@ -133,7 +161,7 @@ class SpatialGCN(nn.Module):
 class PatchMixerLayer(nn.Module):
     def __init__(self, patch_num, d_model, kernel_size=8):
         super().__init__()
-        self.bn1 = nn.BatchNorm1d(patch_num)
+        self.patch_norm = nn.LayerNorm(d_model)
         self.inter_patch = nn.Sequential(
             nn.Conv1d(patch_num, patch_num, kernel_size, padding='same', groups=patch_num),
             nn.GELU(),
@@ -141,21 +169,20 @@ class PatchMixerLayer(nn.Module):
         self.inter_proj = nn.Sequential(
             nn.Conv1d(patch_num, patch_num, 1),
             nn.GELU(),
-            nn.BatchNorm1d(patch_num)
         )
-        self.bn2 = nn.BatchNorm1d(d_model)
+        self.feature_norm = nn.LayerNorm(patch_num)
         self.intra_patch = nn.Sequential(
             nn.Linear(patch_num, patch_num),
             nn.GELU(),
         )
         
     def forward(self, x):
-        h = self.bn1(x)
+        h = self.patch_norm(x)
         h = self.inter_patch(h)
         h = x + h
         h_s = self.inter_proj(h)
         h_t = h_s.permute(0, 2, 1)
-        h_t = self.bn2(h_t)
+        h_t = self.feature_norm(h_t)
         h_t = self.intra_patch(h_t)
         h_t = h_t.permute(0, 2, 1)
         out = h_s + h_t

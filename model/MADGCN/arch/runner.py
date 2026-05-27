@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 from .layers import STLDecomposition, EnhancedSeasonalModule
 from .graph import DynamicCAG, build_ppg
 
@@ -8,7 +9,7 @@ class MADGCNRunner:
     def __init__(self, model, num_nodes, in_dim=1, cycle_len=24, gamma=0.1, 
                  stl_iterations=2, lag_r=12, lag_z=24, 
                  w_trend=0.3, w_season=0.3, w_causal=0.4, learnable_cag_weights=True,
-                 device='cuda', use_dynamic_cag=True):
+                 device='cuda', use_dynamic_cag=True, adaptive_period=True):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.model = model.to(self.device)
         self.num_nodes = num_nodes
@@ -17,7 +18,8 @@ class MADGCNRunner:
         
         self.stl_decomposer = STLDecomposition(
             period=cycle_len, 
-            num_iterations=stl_iterations
+            num_iterations=stl_iterations,
+            adaptive_period=adaptive_period
         ).to(self.device)
         
         self.seasonal_enhancer = EnhancedSeasonalModule(
@@ -120,6 +122,7 @@ class MADGCNRunner:
             'cycle_len': self.cycle_len,
             'use_dynamic_cag': self.use_dynamic_cag,
             'stl_iterations': self.stl_decomposer.num_iterations,
+            'adaptive_period': self.stl_decomposer.adaptive_period,
             'seasonal_gamma': self.seasonal_enhancer.gamma,
         }
         if self.use_dynamic_cag:
@@ -132,9 +135,3 @@ class MADGCNRunner:
                 'lag_z': self.dynamic_cag.granger.lag_z,
             })
         return config
-
-
-try:
-    import numpy as np
-except ImportError:
-    np = None

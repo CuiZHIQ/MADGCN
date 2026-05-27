@@ -3,7 +3,7 @@
 
 ## Introduction
 
-This is the official implementation of our paper: [MADGCN: A Meteorology-Aware Spatio-Temporal Graph Convolutional Netowrk for Long-term Air Pollution Forecasting](https://github.com/CuiZHIQ/MADGCN).
+This is the official implementation of TKDE 2026 paper: [MADGCN: A Meteorology-Aware Spatio-Temporal Graph Convolutional Netowrk for Long-term Air Pollution Forecasting](https://github.com/CuiZHIQ/MADGCN).
 
 In response to escalating global air pollution, air quality forecasting has garnered significant attention. Spatiotemporal graph convolutional networks have emerged as a leading approach. However, existing methods face limitations in modeling long-term dependencies, integrating meteorological variables, and lack large-scale datasets. To address these challenges, we introduce **LargeAQ**, a new large-scale air quality dataset, and propose the **Meteorology-Aware Decoupled Spatio-Temporal Convolutional Network (MADGCN)**. MADGCN jointly addresses long-range temporal modeling and meteorological context integration for accurate and robust air pollution forecasting.
 
@@ -20,7 +20,6 @@ Our dataset is stored in H5 format to avoid the excessive size of CSV files.
 
 We have already preserved the distance-based adjacency matrix in the data structure, which can be easily used. Due to the large scale of the LargeAQ dataset, we recommend users perform temporal downsampling or select a subset of stations based on their specific research needs and computational resources after obtaining the dataset. We recommend referring to the implementations of [LargeST](https://github.com/liuxu77/LargeST) or [BasicTS](https://github.com/zezhishao/BasicTS).
 
-> If you require specific latitude and longitude information for the stations to construct subgraphs for subsets, please send an email to [zhiqing@nuist.edu.cn] to apply for access. Please include the following information in your email: your institution’s name, your full name, and the intended purpose of use. We will ensure a timely response and will share the dataset with you.
 
 | **Dataset**          | **#Stations**                    | **Time span**                         | **Timesteps**                  | **Granularity** | **Coverage**               |
 | :------------------- | :------------------------------- | :------------------------------------ | :----------------------------- | :-------------- | :------------------------- |
@@ -30,6 +29,11 @@ We have already preserved the distance-based adjacency matrix in the data struct
 | KnowAir              | 184                              | 01/01/2014-31/12/2018                 | 11,688                         | 3 h             | Regional                   |
 | **LargeAQ (Ours)**   | **1,341**                        | **01/01/2015-31/12/2023**             | **70,128**                     | 1 h             | **National**               |
 
+## Experiment
+
+The core model implementation is provided under `model/MADGCN/arch/`. The architecture decomposes historical air-quality sequences into trend, seasonal, and residual components, extracts spatial representations from both the physical proximity graph (PPG) and the causal association graph (CAG), and fuses the two graph branches before patch-based temporal forecasting. The main files include `graph.py` for graph construction, `layers.py` for STL decomposition, spatial graph convolution and PatchMixer blocks, `arch.py` for the MADGCN forward architecture, and `runner.py` for model execution and checkpoint utilities.
+
+The provided graph construction utilities under `model/MADGCN/tool/` can be used to precompute static or dynamic CAG matrices from processed time-series windows. For physical proximity graphs such as PPG, users may construct one from station coordinates.
 
 ## Results
 

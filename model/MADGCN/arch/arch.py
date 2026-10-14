@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .layers import PatchMixerBackbone, SpatialGCN, RevIN
+from .layers import PatchMixerBackbone, SpatialGCN, RevIN, WeatherConditioner
 
 
 class MADGCN(nn.Module):
@@ -8,7 +8,8 @@ class MADGCN(nn.Module):
                  seq_length, horizon, layers, patch_len, stride,
                  dropout=0.3, fusion_alpha=0.7, learnable_alpha=False,
                  d_model=128, mixer_kernel_size=8, use_revin=True,
-                 adaptive_fusion=True, **kwargs):
+                 adaptive_fusion=True, meteorology_dim=0, cycle_len=24,
+                 weather_mask=0.1, **kwargs):
         super().__init__()
         self.num_nodes = num_nodes
         self.in_dim = in_dim
@@ -18,6 +19,7 @@ class MADGCN(nn.Module):
         self.learnable_alpha = learnable_alpha
         self.use_revin = use_revin
         self.adaptive_fusion = adaptive_fusion
+        self.meteorology_dim = meteorology_dim
 
         if use_revin:
             self.revin = RevIN(in_dim)
@@ -50,6 +52,8 @@ class MADGCN(nn.Module):
             dropout=dropout
         )
         self.prediction_layer = nn.Linear(d_model, horizon * out_dim)
+        if meteorology_dim:
+            self.conditioner = WeatherConditioner(in_dim, meteorology_dim, embed_dim, cycle_len, weather_mask)
 
     @property
     def fusion_alpha(self):
@@ -83,8 +87,14 @@ class MADGCN(nn.Module):
         residuals = self._from_node_series(residuals_flat, batch_size, num_nodes)
         return trends, seasons_enh, residuals
 
-    def forward(self, history_data, ppg_matrix, cag_matrix, trends, seasons, residuals, seasons_enh=None, **kwargs):
+    def forward(self, history_data, ppg_matrix, cag_matrix, trends, seasons, residuals,
+                seasons_enh=None, meteorology=None, **kwargs):
         batch_size, seq_len, num_nodes, _ = history_data.shape
+        if seq_len != self.seq_length:
+            raise ValueError('Expected the configured historical window')
+        if self.meteorology_dim and (meteorology is None or meteorology.shape !=
+                                    (*history_data.shape[:3], self.meteorology_dim)):
+            raise ValueError('Meteorology must match the historical window and configured feature count')
         if seasons_enh is None:
             seasons_enh = seasons
         
@@ -108,6 +118,8 @@ class MADGCN(nn.Module):
             alpha = self.fusion_alpha
             fused_features = alpha * features_cag + (1 - alpha) * features_ppg
         
+        if self.meteorology_dim:
+            fused_features = self.conditioner(fused_features, history_data, meteorology)
         temporal_input = torch.cat([fused_features, trends, seasons_enh], dim=-1)
         temporal_input = temporal_input.permute(0, 2, 1, 3).reshape(batch_size * num_nodes, seq_len, -1)
         temporal_output = self.temporal_mixer(temporal_input)

@@ -77,15 +77,13 @@ class STLDecomposition(nn.Module):
         trend = torch.zeros_like(x_flat)
         seasonal = torch.zeros_like(x_flat)
         period = self._select_period(x_flat, T)
+        cycles = (T + period - 1) // period
+        counts = (T // period + (torch.arange(period, device=x.device) < T % period)).to(x.dtype)
         
         for _ in range(self.num_iterations):
-            detrended = x_flat - trend
-            new_seasonal = torch.zeros_like(x_flat)
-            for i in range(period):
-                indices = torch.arange(i, T, period, device=x.device)
-                if len(indices) > 0:
-                    new_seasonal[:, :, indices] = detrended[:, :, indices].mean(dim=-1, keepdim=True)
-            seasonal = new_seasonal
+            grouped = F.pad(x_flat - trend, (0, cycles * period - T)).reshape(B * C, cycles, period)
+            phase_mean = grouped.transpose(1, 2).contiguous().mean(dim=-1) * (cycles / counts)
+            seasonal = phase_mean.unsqueeze(1).expand(-1, cycles, -1).reshape(B * C, 1, -1)[..., :T]
             deseasonalized = x_flat - seasonal
             trend = self._moving_average(deseasonalized, period)
             if trend.shape[-1] != T:
@@ -146,7 +144,7 @@ class SpatialGCN(nn.Module):
             else:
                 if adj.dim() == 3:
                     repeat = h.shape[0] // adj.shape[0]
-                    adj_batch = adj.repeat(repeat, 1, 1)
+                    adj_batch = adj.repeat_interleave(repeat, dim=0)
                 elif adj.dim() == 4:
                     adj_batch = adj.reshape(-1, adj.shape[-2], adj.shape[-1])
                 else:
@@ -156,6 +154,39 @@ class SpatialGCN(nn.Module):
         out = torch.cat(out, dim=-1)
         out = self.dropout(F.relu(self.linear(out)))
         return out
+
+
+class WeatherConditioner(nn.Module):
+    def __init__(self, in_dim, meteorology_dim, width, period, weather_mask=0.1):
+        super().__init__()
+        self.weather_mask = weather_mask
+        self.select = nn.Linear(in_dim + meteorology_dim, meteorology_dim)
+        nn.init.zeros_(self.select.weight)
+        nn.init.zeros_(self.select.bias)
+        self.project = nn.Linear(meteorology_dim, width, bias=False)
+        self.kernel = max(2, period // 4 + 1)
+        self.lag = nn.Conv1d(width, width, self.kernel, groups=width, bias=False)
+        self.gate = nn.Linear(2 * width, width)
+        nn.init.zeros_(self.gate.weight)
+        nn.init.constant_(self.gate.bias, -2.)
+        self.value = nn.Linear(width, width, bias=False)
+        nn.init.zeros_(self.value.weight)
+
+    def forward(self, spatial, history, meteorology):
+        if self.training and self.weather_mask:
+            shape = (history.shape[0], 1, 1, meteorology.shape[-1])
+            keep = torch.rand(shape, device=history.device) >= self.weather_mask
+            all_keep = torch.rand((shape[0], 1, 1, 1), device=history.device) >= self.weather_mask
+            meteorology = meteorology * keep * all_keep
+        weights = 2 * torch.sigmoid(self.select(torch.cat([history, meteorology], dim=-1)))
+        context = torch.tanh(self.project(meteorology * weights))
+        batch, length, nodes, width = context.shape
+        temporal = context.permute(0, 2, 3, 1).reshape(batch * nodes, width, length)
+        delayed = self.lag(F.pad(temporal, (self.kernel - 1, 0), mode='replicate'))
+        delayed = delayed.reshape(batch, nodes, width, length).permute(0, 3, 1, 2)
+        context = torch.tanh(context + delayed)
+        gate = torch.sigmoid(self.gate(torch.cat([spatial, context], dim=-1)))
+        return spatial + gate * torch.tanh(self.value(context))
 
 
 class PatchMixerLayer(nn.Module):
